@@ -28,6 +28,9 @@ Detect a small drone by its propeller sound, estimate which direction it's comin
 | Date | Milestone | Notes |
 |------|-----------|-------|
 | 11/04/2026 | Project started | Defined scope and roadmap |
+| 11/04/2026 | Built laptop acoustic detection script | Flags drone buzz by sound energy in the 200–2500 Hz band vs. background; validated on synthetic drone audio |
+| 11/04/2026 | First test on a 48 s drone recording | Detection flickered on and off; diagnosed the cause and fixed it (see below) |
+| 11/04/2026 | Re-tested with fix | One continuous detection from ~3.6 s to ~44.7 s, held through a dip at ~32 s |
 | | | |
 
 ## 📊 Results
@@ -52,7 +55,11 @@ drone-tracking-turret/
 
 ## 🧠 What I'm learning
 <!-- Update as you go: problems you hit and how you solved them. Recruiters read this. -->
-- 
+- **Background estimation (11/04):** On my first test with a 48-second drone recording, the detector flickered on and off even though the drone was audible the whole time. The cause: the script estimated background noise from the quietest 20% of the clip, but the drone was present for ~80% of it, so the "background" already included drone sound. That pushed the threshold up to the drone's own level, and every small wobble crossed it.
+  - **Fix 1:** learn the background from the first 3 seconds (drone-free), the same calibration step the Raspberry Pi version will use.
+  - **Fix 2:** hysteresis, meaning separate ON (+6 dB) and OFF (+3 dB) thresholds, so small level changes near the line don't toggle the detection.
+  - **Result:** background dropped from ~46 dB to ~35.5 dB, and the detector now gives one continuous detection for the whole time the drone is present, even through a ~6 dB dip.
+  - **Takeaway:** a detector is only as good as its noise reference. Next: test decoys (fans, traffic, lawnmowers) to see what fools a pure loudness check.
 
 ## ⚠️ Scope
 This is a passive detection and tracking system only. It carries no effector and does not interfere with any aircraft. Testing uses recorded drone audio and indoor sub-250 g drones; any outdoor flights follow FAA recreational rules outside restricted airspace.
