@@ -34,6 +34,10 @@ Detect a small drone by its propeller sound, estimate which direction it's comin
 | | | |
 
 ## 📊 Results
+**Acoustic detection on a 48 s drone recording** ([code](acoustic/drone_detect_laptop.py)): one continuous detection while the drone is present. Top: spectrogram, where the drone's harmonics show as stacked horizontal lines. Bottom: energy in the drone band vs. the ON/OFF thresholds.
+
+![Detection after fix](media/After_Fix.png)
+
 *Coming soon:* bearing error vs. true angle, detection range, and tracking error over time.
 
 ## 🧰 Tech stack
@@ -59,6 +63,11 @@ drone-tracking-turret/
   - **Fix 1:** learn the background from the first 3 seconds (drone-free), the same calibration step the Raspberry Pi version will use.
   - **Fix 2:** hysteresis, meaning separate ON (+6 dB) and OFF (+3 dB) thresholds, so small level changes near the line don't toggle the detection.
   - **Result:** background dropped from ~46 dB to ~35.5 dB, and the detector now gives one continuous detection for the whole time the drone is present, even through a ~6 dB dip.
+
+  | Before (flickering) | After (fixed) |
+  |---|---|
+  | ![Before fix](media/Before_Fix.png) | ![After fix](media/After_Fix.png) |
+
   - **Takeaway:** a detector is only as good as its noise reference. Next: test decoys (fans, traffic, lawnmowers) to see what fools a pure loudness check.
 
 ## ⚠️ Scope
