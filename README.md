@@ -1,8 +1,8 @@
 # Drone Detection & Tracking Turret 🎯
 
-A camera-based system that **detects small drones** using computer vision and **tracks them in real time** on a pan-tilt turret with closed-loop control.
+A low-cost system that **hears a drone** with a microphone array, **swings a camera toward it**, and then **locks on visually** with a pan-tilt turret, using sound first and sight second.
 
-> **Status:** 🟡 In progress, Phase 1 (detection)
+> **Status:** 🟡 In progress, Part A (acoustic detector)
 
 <!-- Replace with your best photo, render, or GIF once you have one -->
 <!-- ![Project image](media/hero.jpg) -->
@@ -10,13 +10,19 @@ A camera-based system that **detects small drones** using computer vision and **
 ---
 
 ## 🎯 Goal
-Build a low-cost sensing system that can spot a small drone in a camera feed, distinguish it from birds and background clutter, and keep it centered in frame as it moves, then measure how accurately and how fast it tracks.
+Detect a small drone by its propeller sound, estimate which direction it's coming from, hand that bearing to a camera turret, and keep the drone centered in frame, then measure detection range, bearing accuracy, and tracking error.
+
+## ⚙️ How it works
+1. **Hear:** a 4-mic array on a Raspberry Pi listens for the drone's propeller buzz (energy in the few-hundred-Hz to few-kHz band, compared with background noise).
+2. **Locate:** the SRP-PHAT algorithm compares tiny arrival-time differences between the mics to estimate the drone's bearing.
+3. **Point:** the bearing commands the pan servo to swing the camera toward the sound.
+4. **Lock on:** OpenCV finds the target in the camera frame, and a control loop keeps it centered.
 
 ## 🗺️ Roadmap
-- [ ] **Phase 1: Detection:** train/fine-tune an object detection model on drone images; measure accuracy and false positives (birds, planes, clouds)
-- [ ] **Phase 2: Tracking controller:** convert the drone's pixel offset into pan/tilt commands; tune a PID loop in simulation and on a bench target
-- [ ] **Phase 3: Turret hardware:** 3D-printed pan-tilt mount, servos or steppers, camera, onboard computer
-- [ ] **Phase 4: Field testing:** track a real drone outdoors; log tracking error, latency, and detection range
+- [ ] **Part A: Acoustic detector:** detection + direction finding; calibrate bearing error at 30° increments
+- [ ] **Part B: Tracking turret:** pan-tilt camera mount, OpenCV target tracking, controller tuning
+- [ ] **Part C: Combined system:** acoustic cue hands off to the camera, which takes over tracking
+- [ ] **Testing & write-up:** detection range, bearing accuracy, tracking error, response time
 
 ## 📈 Progress log
 | Date | Milestone | Notes |
@@ -25,20 +31,21 @@ Build a low-cost sensing system that can spot a small drone in a camera feed, di
 | | | |
 
 ## 📊 Results
-*Coming soon:* detection accuracy, tracking error over time, and system latency.
+*Coming soon:* bearing error vs. true angle, detection range, and tracking error over time.
 
 ## 🧰 Tech stack
-- **Software:** Python, OpenCV, YOLO object detection
-- **Hardware:** Raspberry Pi / Jetson Nano, camera module, pan-tilt servos, 3D-printed mount
+- **Software:** Python, NumPy, SciPy, sounddevice, pyroomacoustics (SRP-PHAT), OpenCV
+- **Hardware:** Raspberry Pi, 4-mic array board, Pi camera, pan-tilt servo mount
 - **CAD:** SolidWorks / Fusion 360
 
 ## 📁 Repository structure
 ```
 drone-tracking-turret/
-├── detection/    # model training & inference
-├── tracking/     # controller code
+├── acoustic/     # detection & direction finding (drone_doa.py)
+├── turret/       # camera tracking & servo control
+├── combined/     # acoustic-to-camera handoff
 ├── hardware/     # CAD files, wiring diagrams
-├── data/         # test logs
+├── data/         # recordings & test logs
 ├── media/        # photos, videos, plots
 └── README.md
 ```
@@ -48,7 +55,7 @@ drone-tracking-turret/
 - 
 
 ## ⚠️ Scope
-This is a passive detection and tracking system only. It carries no effector and does not interfere with any aircraft. Drone test flights follow FAA recreational flying rules.
+This is a passive detection and tracking system only. It carries no effector and does not interfere with any aircraft. Testing uses recorded drone audio and indoor sub-250 g drones; any outdoor flights follow FAA recreational rules outside restricted airspace.
 
 ---
 *Built by Mat Yohannes · Mechanical Engineering, Howard University*
