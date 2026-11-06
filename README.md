@@ -33,6 +33,7 @@ Detect a small drone by its propeller sound, estimate which direction it's comin
 | 11/04/2026 | Re-tested with fix | One continuous detection from ~3.6 s to ~44.7 s, held through a dip at ~32 s |
 | 11/05/2026 | Decoy test (lawnmower, talking, traffic) | v2 rejected 0 of 3 for the right reason: lawnmower 24 s false alarm, talking 2 false alarms, traffic passed only because its background estimate was inflated |
 | 11/05/2026 | v3: harmonic detection | Switched from loudness to harmonic pattern + steady pitch; drone still detected, all 3 decoys rejected |
+| 11/05/2026 | Fan test (known limit found) | v3 flagged a fan as a drone for ~30 s (from ~15 s to end of clip). Documented as a known limit instead of tuning to one clip |
 | | | |
 
 ## 📊 Results
@@ -45,11 +46,16 @@ For each 0.5 s frame, the detector tries every candidate main tone from 100–45
 | Lawnmower (37 s) | ❌ 24 s false alarm | ✅ rejected |
 | Talking (121 s) | ❌ 2 false alarms | ✅ rejected |
 | Traffic (74 s) | ⚠️ passed for the wrong reason | ✅ rejected |
+| Fan (45 s) | not tested | ❌ ~30 s false alarm (known limit) |
 
 ![v3 drone detection](media/v3_drone.png)
 *Top: spectrogram, where the drone shows as evenly spaced horizontal lines. Middle: estimated main tone; green = steady (drone-like). Bottom: harmonic score vs. ON/OFF thresholds.*
 
-**Known limits:** tested on only 4 clips, so the thresholds aren't proven on a larger set. A steady machine whine (fan motor, electrical hum) also makes a steady harmonic tone and could still cause false alarms; that's the next test.
+**Known limits:**
+- **Fans and other bladed machines:** v3 detects *spinning-blade sound*, not drones specifically. A fan produced the same fingerprint as the drone (harmonic lines and a steady main tone, ~260–290 Hz, then ~420–440 Hz after a speed change) and caused a ~30 s false alarm. Acoustically, a fan and a drone are both motors spinning blades, so this is a fundamental limit of single-sensor acoustic detection, not just a threshold problem.
+- **Small test set:** 1 drone recording and 4 decoys. I chose not to tune v3 to reject this one fan clip, because with only one drone recording any "fix" would likely be overfitting and could break on the next real drone.
+- **How the system design handles it:** sound is used as a *cue*, not a final answer. In Part C, the acoustic bearing points the camera, and the camera confirms whether the target is actually a drone. Real counter-drone systems take the same approach, pairing acoustics with a second sensor.
+- **Next:** collect 3–5 more drone recordings (different drones, distances, outdoors) plus more fan/motor clips before attempting to separate them by sound alone.
 
 *Coming soon:* bearing error vs. true angle, detection range, and tracking error over time.
 
@@ -92,7 +98,13 @@ drone-tracking-turret/
   | Talking | ![](media/v2_talking.png) | ![](media/v3_talking.png) |
   | Traffic | ![](media/v2_traffic.png) | ![](media/v3_traffic.png) |
 
-  - **Takeaway:** a good detector looks for what makes the target *different*, not just what makes it loud. Next: test steady machine noise (fans, hums) and more drone recordings.
+  - **Takeaway:** a good detector looks for what makes the target *different*, not just what makes it loud.
+- **The fan test (11/05):** Steady machine noise was the obvious next decoy, so I tested a fan. v3 flagged it as a drone for ~30 s. The reason: a fan is a motor spinning blades, just like a drone, so it makes the same harmonic pattern with a steady pitch. Before ~15 s the fan's pattern was too weak to trigger; once it got louder and clearer, the score jumped above 20 and stayed there.
+
+  ![v3 fan false alarm](media/v3_fan.png)
+
+  - **Decision:** document it as a known limit instead of tweaking thresholds to beat one clip. With a single drone recording, I can't tell whether a new rule separates *drones* from *fans* or just *this* drone from *this* fan.
+  - **Takeaway:** some limits can't be fixed with better thresholds. This one is why the system pairs the microphones with a camera: sound says "something with propellers, over there," and vision confirms what it is.
 
 ## ⚠️ Scope
 This is a passive detection and tracking system only. It carries no effector and does not interfere with any aircraft. Testing uses recorded drone audio and indoor sub-250 g drones; any outdoor flights follow FAA recreational rules outside restricted airspace.
