@@ -1,23 +1,32 @@
 """
 drone_detect_laptop.py  -  Part A (laptop version) of the Drone Detector + Tracking Turret
+Version 3: harmonic detection
 
 Detects a drone's propeller buzz in an audio recording. No hardware needed.
 
-How it works (same idea as the Raspberry Pi version):
-  1. Split the audio into short frames (0.25 s each).
-  2. For each frame, measure the sound energy in the drone band (200-2500 Hz).
-  3. Learn the background noise level from the first few (drone-free) seconds.
-  4. Turn detection ON when band energy rises well above background,
-     and OFF only when it falls back near background (hysteresis = no flicker).
-  5. Plot everything so you can SEE the drone's buzz.
+Why version 3: versions 1-2 only checked HOW LOUD the 200-2500 Hz band was.
+Decoy tests showed loudness alone can't tell a drone from a lawnmower, traffic,
+or speech. Version 3 checks WHAT THE SOUND LOOKS LIKE instead:
+
+  1. Harmonic pattern: a drone's propellers make a main tone (the "blade-pass"
+     frequency, ~100-450 Hz) plus evenly spaced harmonics at 2x, 3x, 4x, 5x.
+     For each 0.5 s frame, the script tries every candidate main tone and scores
+     how much stronger the spectrum is AT its harmonics than BETWEEN them.
+  2. Steady pitch: a hovering drone's main tone stays nearly constant. Speech
+     and traffic jump around. The pitch must stay within 8% over ~1 s.
+  3. Duration: the pattern must hold for 1 s (4 frames in a row) to switch ON,
+     and detection stays ON until the harmonic score drops below a lower OFF
+     level (hysteresis, so small dips don't cause flicker).
+
+No background-noise calibration is needed, so it no longer matters how the
+recording starts.
 
 Usage:
-  python drone_detect_laptop.py --demo                 # makes a fake drone sound and tests on it
-  python drone_detect_laptop.py my_recording.wav       # runs on your own recording
-  python drone_detect_laptop.py my_recording.wav --noise-sec 2   # background from first 2 s
+  python3 drone_detect_laptop.py --demo            # fake drone sound test
+  python3 drone_detect_laptop.py my_recording.wav  # your own recording
 
 Install first:
-  pip install numpy scipy matplotlib
+  pip3 install numpy scipy matplotlib
 """
 
 import argparse
@@ -25,18 +34,19 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.io import wavfile
+from scipy.ndimage import median_filter, uniform_filter1d
 from scipy.signal import spectrogram
 
 # ---------------- Settings you can tune ----------------
-BAND_LOW_HZ = 200        # bottom of the drone frequency band
-BAND_HIGH_HZ = 2500      # top of the band (matches the Pi version's limit)
-FRAME_SEC = 0.25         # length of each analysis frame
-THRESHOLD_ON_DB = 6.0    # switch detection ON this far above background (6 dB = 4x the energy)
-THRESHOLD_OFF_DB = 3.0   # switch it OFF only below this level (hysteresis: stops flicker)
-NOISE_SEC = 3.0          # learn the background from the first N seconds (keep them drone-free)
-                         # set to 0 to guess from the quietest 20% of the whole clip instead
-NOISE_PERCENTILE = 20    # used only when NOISE_SEC = 0
-MIN_FRAMES = 2           # need this many frames in a row above ON to confirm a detection
+FRAME_SEC = 0.5          # analysis window (longer = finer frequency detail)
+HOP_SEC = 0.25           # time step between frames
+F0_MIN_HZ = 100          # lowest main tone to consider (blade-pass frequency)
+F0_MAX_HZ = 450          # highest main tone to consider
+N_HARMONICS = 5          # how many harmonics to check (1x ... 5x)
+SCORE_ON = 16.0          # harmonic score needed to switch detection ON
+SCORE_OFF = 10.0         # detection stays ON until the score drops below this
+PITCH_STEADY = 0.08      # main tone must vary less than 8% over ~1 s
+MIN_FRAMES = 4           # frames in a row needed to switch ON (4 x 0.25 s = 1 s)
 # -------------------------------------------------------
 
 
@@ -44,15 +54,10 @@ def make_demo_audio(fs=16000, seconds=10, seed=0):
     """Create a fake recording: background noise, then a drone buzz from 3 s to 8 s."""
     rng = np.random.default_rng(seed)
     t = np.arange(int(fs * seconds)) / fs
-
-    noise = 0.05 * rng.standard_normal(len(t))      # room / street noise
-
-    # A drone's buzz = a "blade-pass" tone plus its harmonics, with a slight wobble
-    f0 = 180 + 5 * np.sin(2 * np.pi * 0.3 * t)       # ~180 Hz, drifting as the motors adjust
+    noise = 0.05 * rng.standard_normal(len(t))
+    f0 = 180 + 5 * np.sin(2 * np.pi * 0.3 * t)          # ~180 Hz, slight drift
     phase = 2 * np.pi * np.cumsum(f0) / fs
     buzz = sum((0.6 / k) * np.sin(k * phase) for k in range(1, 9))
-
-    # Drone flies in (fade up), hovers, then flies away (fade down)
     envelope = np.clip((t - 3) / 1.0, 0, 1) * np.clip((8 - t) / 1.0, 0, 1)
     audio = noise + 0.25 * envelope * buzz
     return fs, audio.astype(np.float32)
@@ -61,8 +66,8 @@ def make_demo_audio(fs=16000, seconds=10, seed=0):
 def load_audio(path):
     """Load a WAV file, convert to mono floating point between -1 and 1."""
     fs, data = wavfile.read(path)
-    data = data.astype(np.float32)
-    if data.ndim > 1:                    # stereo or multi-channel -> average to mono
+    data = data.astype(np.float64)
+    if data.ndim > 1:                     # stereo -> mono
         data = data.mean(axis=1)
     peak = np.max(np.abs(data))
     if peak > 0:
@@ -70,68 +75,88 @@ def load_audio(path):
     return fs, data
 
 
-def band_energy_per_frame(audio, fs):
-    """Return the time of each frame and its energy (in dB) inside the drone band."""
-    frame_len = int(FRAME_SEC * fs)
-    n_frames = len(audio) // frame_len
-    freqs = np.fft.rfftfreq(frame_len, d=1 / fs)
-    in_band = (freqs >= BAND_LOW_HZ) & (freqs <= BAND_HIGH_HZ)
-    window = np.hanning(frame_len)
+def harmonic_score(audio, fs):
+    """For each frame, find the main tone with the strongest harmonic pattern.
 
-    times, energy_db = [], []
-    for i in range(n_frames):
-        frame = audio[i * frame_len:(i + 1) * frame_len] * window
-        spectrum = np.abs(np.fft.rfft(frame)) ** 2
-        energy = spectrum[in_band].sum() + 1e-12     # tiny number avoids log(0)
-        times.append((i + 0.5) * FRAME_SEC)
-        energy_db.append(10 * np.log10(energy))
-    return np.array(times), np.array(energy_db)
-
-
-def detect(energy_db, noise_sec=NOISE_SEC):
-    """Compare each frame to the background level.
-
-    Background: the average of the first `noise_sec` seconds (like the Pi version's
-    "stay quiet for 3 seconds"), or the quietest frames if noise_sec is 0.
-    Hysteresis: turn ON above the ON threshold (for MIN_FRAMES in a row),
-    stay ON until the level drops below the lower OFF threshold.
+    Returns frame times, the best harmonic score (dB), and the main tone (Hz).
     """
-    n_noise = int(noise_sec / FRAME_SEC)
-    if n_noise > 0 and n_noise < len(energy_db):
-        background_db = np.median(energy_db[:n_noise])
-    else:
-        background_db = np.percentile(energy_db, NOISE_PERCENTILE)
-    on_db = background_db + THRESHOLD_ON_DB
-    off_db = background_db + THRESHOLD_OFF_DB
+    n = int(FRAME_SEC * fs)
+    hop = int(HOP_SEC * fs)
+    window = np.hanning(n)
+    freqs = np.fft.rfftfreq(n, d=1 / fs)
+    df = freqs[1]
+    top = np.searchsorted(freqs, N_HARMONICS * F0_MAX_HZ * 1.05 + 50)
+    f0_candidates = np.arange(F0_MIN_HZ, F0_MAX_HZ, 2.0)
 
-    detected = np.zeros(len(energy_db), dtype=bool)
+    # Pre-compute which frequency bins to check for every candidate:
+    # a small window AT each harmonic (k * f0) and BETWEEN harmonics ((k + 0.5) * f0)
+    def bin_range(center, tol):
+        return np.searchsorted(freqs, center - tol), np.searchsorted(freqs, center + tol) + 1
+
+    def tol(k, f0):
+        return max(0.03 * k * f0, 3 * df)
+
+    ranges = [[(bin_range(k * f0, tol(k, f0)), bin_range((k + 0.5) * f0, tol(k, f0)))
+               for k in range(1, N_HARMONICS + 1)] for f0 in f0_candidates]
+
+    times, scores, pitches = [], [], []
+    for start in range(0, len(audio) - n, hop):
+        spectrum_db = 20 * np.log10(np.abs(np.fft.rfft(audio[start:start + n] * window))[:top] + 1e-9)
+        spectrum_db = uniform_filter1d(spectrum_db, 3)
+        envelope = median_filter(spectrum_db, size=int(150 / df) | 1)
+        peaks_db = spectrum_db - envelope            # how far each bin sticks out above its neighborhood
+
+        best_score, best_f0 = -99.0, 0.0
+        for f0, harmonics in zip(f0_candidates, ranges):
+            at = np.mean([peaks_db[a:b].max() for (a, b), _ in harmonics])
+            between = np.mean([peaks_db[a:b].mean() for _, (a, b) in harmonics])
+            if at - between > best_score:
+                best_score, best_f0 = at - between, f0
+        times.append((start + n / 2) / fs)
+        scores.append(best_score)
+        pitches.append(best_f0)
+
+    scores = median_filter(np.array(scores), 3)      # smooth out single-frame blips
+    return np.array(times), scores, np.array(pitches)
+
+
+def pitch_is_steady(pitches):
+    """True where the main tone stays within PITCH_STEADY over about 1 s (5 frames)."""
+    steady = np.zeros(len(pitches), dtype=bool)
+    for i in range(len(pitches)):
+        nearby = pitches[max(0, i - 2):i + 3]
+        steady[i] = np.ptp(nearby) / np.median(nearby) < PITCH_STEADY
+    return steady
+
+
+def detect(scores, steady):
+    """ON: strong harmonic pattern + steady pitch for MIN_FRAMES in a row.
+    Stays ON until the harmonic score drops below SCORE_OFF."""
+    detected = np.zeros(len(scores), dtype=bool)
     active, run = False, 0
-    for i, e in enumerate(energy_db):
+    for i in range(len(scores)):
         if not active:
-            run = run + 1 if e > on_db else 0
+            run = run + 1 if (scores[i] > SCORE_ON and steady[i]) else 0
             if run >= MIN_FRAMES:
                 active = True
                 detected[i - MIN_FRAMES + 1:i + 1] = True
+        elif scores[i] < SCORE_OFF:
+            active, run = False, 0
         else:
-            if e < off_db:
-                active, run = False, 0
-            else:
-                detected[i] = True
-    return detected, background_db, on_db, off_db
+            detected[i] = True
+    return detected
 
 
 def print_events(times, detected):
-    """Print when each detection starts and stops."""
     events, start = [], None
     for t, d in zip(times, detected):
         if d and start is None:
-            start = t - FRAME_SEC / 2
+            start = t - HOP_SEC / 2
         elif not d and start is not None:
-            events.append((start, t - FRAME_SEC / 2))
+            events.append((start, t - HOP_SEC / 2))
             start = None
     if start is not None:
-        events.append((start, times[-1] + FRAME_SEC / 2))
-
+        events.append((start, times[-1] + HOP_SEC / 2))
     if not events:
         print("No drone detected.")
     for s, e in events:
@@ -139,28 +164,36 @@ def print_events(times, detected):
     return events
 
 
-def plot(audio, fs, times, energy_db, detected, threshold_db, off_db, background_db, title):
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
+def plot(audio, fs, times, scores, pitches, steady, detected, title):
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(11, 9), sharex=True,
+                                        gridspec_kw={"height_ratios": [2, 1, 1.4]})
 
-    # Top: spectrogram - the drone shows up as bright horizontal lines (its harmonics)
-    f, t, S = spectrogram(audio, fs, nperseg=1024, noverlap=768)
+    # 1. Spectrogram: a drone shows up as evenly spaced bright horizontal lines
+    f, t, S = spectrogram(audio, fs, nperseg=2048, noverlap=1536)
     ax1.pcolormesh(t, f, 10 * np.log10(S + 1e-12), shading="auto", cmap="magma")
-    ax1.axhspan(BAND_LOW_HZ, BAND_HIGH_HZ, color="cyan", alpha=0.08)
-    ax1.set_ylim(0, min(4000, fs / 2))
+    ax1.set_ylim(0, 2000)
     ax1.set_ylabel("Frequency (Hz)")
-    ax1.set_title(f"{title}: spectrogram (shaded = drone band)")
+    ax1.set_title(f"{title}: spectrogram (drone = evenly spaced horizontal lines)")
 
-    # Bottom: band energy vs threshold, with detections shaded
-    ax2.plot(times, energy_db, label="Energy in drone band", color="tab:blue")
-    ax2.axhline(threshold_db, color="red", linestyle="--", label="ON threshold")
-    ax2.axhline(off_db, color="orange", linestyle="--", label="OFF threshold")
-    ax2.axhline(background_db, color="gray", linestyle=":", label="Background level")
-    ax2.fill_between(times, energy_db.min() - 3, energy_db.max() + 3,
-                     where=detected, color="red", alpha=0.15, label="Drone detected")
-    ax2.set_xlabel("Time (s)")
-    ax2.set_ylabel("Energy (dB)")
-    ax2.legend(loc="upper right")
+    # 2. Main tone over time: steady = drone-like, scattered = noise/speech
+    ax2.scatter(times[~steady], pitches[~steady], s=6, color="lightgray", label="Pitch jumping")
+    ax2.scatter(times[steady], pitches[steady], s=8, color="tab:green", label="Pitch steady")
+    ax2.set_ylim(F0_MIN_HZ - 20, F0_MAX_HZ + 20)
+    ax2.set_ylabel("Main tone (Hz)")
+    ax2.legend(loc="upper right", fontsize=8)
     ax2.grid(alpha=0.3)
+
+    # 3. Harmonic score vs thresholds, detections shaded
+    ax3.plot(times, scores, color="tab:blue", label="Harmonic score")
+    ax3.axhline(SCORE_ON, color="red", linestyle="--", label="ON threshold")
+    ax3.axhline(SCORE_OFF, color="orange", linestyle="--", label="OFF threshold")
+    lo, hi = min(scores.min(), SCORE_OFF) - 2, max(scores.max(), SCORE_ON) + 2
+    ax3.fill_between(times, lo, hi, where=detected, color="red", alpha=0.15, label="Drone detected")
+    ax3.set_ylim(lo, hi)
+    ax3.set_xlabel("Time (s)")
+    ax3.set_ylabel("Score (dB)")
+    ax3.legend(loc="upper right", fontsize=8)
+    ax3.grid(alpha=0.3)
 
     fig.tight_layout()
     fig.savefig("detection_plot.png", dpi=120)
@@ -172,25 +205,25 @@ def main():
     parser = argparse.ArgumentParser(description="Detect drone sound in a recording.")
     parser.add_argument("wav", nargs="?", help="path to a .wav file")
     parser.add_argument("--demo", action="store_true", help="use a generated fake drone sound")
-    parser.add_argument("--noise-sec", type=float, default=NOISE_SEC,
-                        help="seconds at the start to learn background from (0 = auto)")
     args = parser.parse_args()
 
     if args.demo or not args.wav:
         print("Demo mode: fake drone buzz from 3 s to 8 s")
         fs, audio = make_demo_audio()
-        wavfile.write("demo_drone.wav", fs, audio)   # so you can listen to it
+        wavfile.write("demo_drone.wav", fs, audio)
         title = "Demo"
     else:
         fs, audio = load_audio(args.wav)
         title = args.wav
 
-    times, energy_db = band_energy_per_frame(audio, fs)
-    detected, background_db, threshold_db, off_db = detect(energy_db, args.noise_sec)
-    print(f"Sample rate: {fs} Hz | Length: {len(audio) / fs:.1f} s")
-    print(f"Background: {background_db:.1f} dB | ON: {threshold_db:.1f} dB | OFF: {off_db:.1f} dB")
+    print(f"Sample rate: {fs} Hz | Length: {len(audio) / fs:.1f} s | analyzing...")
+    times, scores, pitches = harmonic_score(audio, fs)
+    steady = pitch_is_steady(pitches)
+    detected = detect(scores, steady)
+    print(f"Pitch steady in {100 * steady.mean():.0f}% of frames | "
+          f"max harmonic score {scores.max():.1f} (ON at {SCORE_ON})")
     print_events(times, detected)
-    plot(audio, fs, times, energy_db, detected, threshold_db, off_db, background_db, title)
+    plot(audio, fs, times, scores, pitches, steady, detected, title)
 
 
 if __name__ == "__main__":
