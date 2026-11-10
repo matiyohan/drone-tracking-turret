@@ -1,113 +1,125 @@
-# Drone Detection & Tracking Turret 🎯
+# Drone Detection and Tracking Turret
 
-A low-cost system that **hears a drone** with a microphone array, **swings a camera toward it**, and then **locks on visually** with a pan-tilt turret, using sound first and sight second.
+A low-cost system that detects a small drone by sound, estimates its direction with a microphone array, and hands that bearing to a pan-tilt camera turret that locks on and tracks it visually.
 
-> **Status:** 🟡 In progress, Part A (acoustic detector)
+**Status:** In progress. The acoustic detection algorithm is prototyped and tested in Python on recorded audio. Hardware (Raspberry Pi, microphone array, turret) has not been built yet.
 
-<!-- Replace with your best photo, render, or GIF once you have one -->
-<!-- ![Project image](media/hero.jpg) -->
+## How it works
 
----
+1. **Detect:** a microphone listens for propeller noise. Drone propellers produce a steady fundamental tone (the blade-pass frequency, roughly 100–450 Hz) with evenly spaced harmonics, and the detector looks for that pattern.
+2. **Locate:** a 4-microphone array estimates the direction of the sound from arrival-time differences between microphones (SRP-PHAT).
+3. **Point:** the bearing drives the pan servo to turn the camera toward the source.
+4. **Confirm and track:** the camera identifies the target and a control loop keeps it centered in the frame.
 
-## 🎯 Goal
-Detect a small drone by its propeller sound, estimate which direction it's coming from, hand that bearing to a camera turret, and keep the drone centered in frame, then measure detection range, bearing accuracy, and tracking error.
+Steps 2–4 are planned. Step 1 is implemented and tested (see Results).
 
-## ⚙️ How it works
-1. **Hear:** a 4-mic array on a Raspberry Pi listens for the drone's propeller buzz, recognized by its harmonic pattern: a steady main tone (~100–450 Hz) plus evenly spaced harmonics.
-2. **Locate:** the SRP-PHAT algorithm compares tiny arrival-time differences between the mics to estimate the drone's bearing.
-3. **Point:** the bearing commands the pan servo to swing the camera toward the sound.
-4. **Lock on:** OpenCV finds the target in the camera frame, and a control loop keeps it centered.
+## Results: acoustic detection
 
-## 🗺️ Roadmap
-- [ ] **Part A: Acoustic detector:** detection + direction finding; calibrate bearing error at 30° increments
-- [ ] **Part B: Tracking turret:** pan-tilt camera mount, OpenCV target tracking, controller tuning
-- [ ] **Part C: Combined system:** acoustic cue hands off to the camera, which takes over tracking
-- [ ] **Testing & write-up:** detection range, bearing accuracy, tracking error, response time
+Code: [`acoustic/drone_detect_laptop.py`](acoustic/drone_detect_laptop.py)
 
-## 📈 Progress log
+For each 0.5 s frame, the detector tests candidate fundamental frequencies from 100–450 Hz and scores how much stronger the spectrum is at the first five harmonics than between them. A detection requires a high harmonic score and a fundamental that stays within 8% for at least 1 s. Once triggered, detection holds until the score falls below a lower threshold (hysteresis).
+
+| Clip | Length | v2 (loudness-based) | v3 (harmonic + pitch stability) |
+|---|---|---|---|
+| Drone | 48 s | Detected | Detected, 5.4–46.6 s |
+| Lawnmower | 37 s | False alarm, 24 s | No detection |
+| Speech | 121 s | 2 false alarms | No detection |
+| Traffic | 74 s | No detection (for the wrong reason, see notes) | No detection |
+| Fan | 45 s | Not tested | False alarm, ~30 s |
+
+![v3 detection on drone recording](media/v3_drone.png)
+
+*Top: spectrogram; the drone appears as evenly spaced horizontal lines. Middle: estimated fundamental frequency, green where stable. Bottom: harmonic score against the on/off thresholds, with detections shaded.*
+
+## Known limitations
+
+- **Fans and other bladed machines.** The detector responds to spinning-blade noise, not to drones specifically. A fan produces the same harmonic structure with a stable fundamental (~260–290 Hz, then ~420–440 Hz after a speed change) and triggered a ~30 s false alarm. Because a fan and a drone are both motors driving blades, this is a limit of single-sensor acoustic detection rather than a tuning problem.
+- **Small test set.** Results are based on one drone recording and four non-drone recordings. I did not tune the detector to reject the fan clip: with a single drone recording, a rule that separates that fan from that drone may not generalize.
+- **How the design addresses it.** Acoustic detection is used as a cue, not a final decision. The bearing points the camera, and visual confirmation decides whether the target is a drone. Fielded counter-UAS systems pair acoustic sensing with a second sensor for the same reason.
+- **Next step.** Collect more drone recordings (different airframes, distances, outdoor conditions) and more motor/fan recordings before attempting acoustic-only discrimination.
+
+## Development log
+
 | Date | Milestone | Notes |
-|------|-----------|-------|
-| 11/04/2026 | Project started | Defined scope and roadmap |
-| 11/04/2026 | Built laptop acoustic detection script | Flags drone buzz by sound energy in the 200–2500 Hz band vs. background; validated on synthetic drone audio |
-| 11/04/2026 | First test on a 48 s drone recording | Detection flickered on and off; diagnosed the cause and fixed it (see below) |
-| 11/04/2026 | Re-tested with fix | One continuous detection from ~3.6 s to ~44.7 s, held through a dip at ~32 s |
-| 11/05/2026 | Decoy test (lawnmower, talking, traffic) | v2 rejected 0 of 3 for the right reason: lawnmower 24 s false alarm, talking 2 false alarms, traffic passed only because its background estimate was inflated |
-| 11/05/2026 | v3: harmonic detection | Switched from loudness to harmonic pattern + steady pitch; drone still detected, all 3 decoys rejected |
-| 11/05/2026 | Fan test (known limit found) | v3 flagged a fan as a drone for ~30 s (from ~15 s to end of clip). Documented as a known limit instead of tuning to one clip |
-| | | |
-
-## 📊 Results
-### Acoustic detection, v3 ([code](acoustic/drone_detect_laptop.py))
-For each 0.5 s frame, the detector tries every candidate main tone from 100–450 Hz and scores how much the spectrum sticks out **at** its harmonics (1×–5×) versus **between** them. A drone is declared only when the score is high **and** the main tone stays within 8% for at least 1 s. Detection then holds until the score drops below a lower OFF level (hysteresis).
-
-| Clip | v2 (loudness) | v3 (harmonic + steady pitch) |
 |---|---|---|
-| Drone (48 s) | ✅ detected | ✅ detected, 5.4–46.6 s |
-| Lawnmower (37 s) | ❌ 24 s false alarm | ✅ rejected |
-| Talking (121 s) | ❌ 2 false alarms | ✅ rejected |
-| Traffic (74 s) | ⚠️ passed for the wrong reason | ✅ rejected |
-| Fan (45 s) | not tested | ❌ ~30 s false alarm (known limit) |
+| 11/04/2026 | Project started | Defined scope and roadmap |
+| 11/04/2026 | v1 detector | Energy in the 200–2500 Hz band compared to background; validated on synthetic audio |
+| 11/04/2026 | First test on real drone audio | Detection flickered on and off; see engineering notes |
+| 11/04/2026 | v2 detector | Start-of-clip noise calibration and hysteresis; one continuous detection (~3.6–44.7 s) |
+| 11/05/2026 | Decoy test | v2 failed all three decoys (lawnmower, speech, traffic) |
+| 11/05/2026 | v3 detector | Harmonic pattern and pitch stability; drone detected, all three decoys rejected |
+| 11/05/2026 | Fan test | v3 false alarm on a fan; documented as a known limitation |
 
-![v3 drone detection](media/v3_drone.png)
-*Top: spectrogram, where the drone shows as evenly spaced horizontal lines. Middle: estimated main tone; green = steady (drone-like). Bottom: harmonic score vs. ON/OFF thresholds.*
+## Engineering notes
 
-**Known limits:**
-- **Fans and other bladed machines:** v3 detects *spinning-blade sound*, not drones specifically. A fan produced the same fingerprint as the drone (harmonic lines and a steady main tone, ~260–290 Hz, then ~420–440 Hz after a speed change) and caused a ~30 s false alarm. Acoustically, a fan and a drone are both motors spinning blades, so this is a fundamental limit of single-sensor acoustic detection, not just a threshold problem.
-- **Small test set:** 1 drone recording and 4 decoys. I chose not to tune v3 to reject this one fan clip, because with only one drone recording any "fix" would likely be overfitting and could break on the next real drone.
-- **How the system design handles it:** sound is used as a *cue*, not a final answer. In Part C, the acoustic bearing points the camera, and the camera confirms whether the target is actually a drone. Real counter-drone systems take the same approach, pairing acoustics with a second sensor.
-- **Next:** collect 3–5 more drone recordings (different drones, distances, outdoors) plus more fan/motor clips before attempting to separate them by sound alone.
+### Noise estimation (v1 to v2)
 
-*Coming soon:* bearing error vs. true angle, detection range, and tracking error over time.
+On the first real recording, detection switched on and off repeatedly while the drone was audible the whole time. The background level was estimated from the quietest 20% of frames, but the drone was present for about 80% of the clip, so the background estimate already included drone noise. That raised the threshold to the drone's own level, and small fluctuations crossed it.
 
-## 🧰 Tech stack
-- **Software:** Python, NumPy, SciPy, sounddevice, pyroomacoustics (SRP-PHAT), OpenCV
-- **Hardware:** Raspberry Pi, 4-mic array board, Pi camera, pan-tilt servo mount
+Changes:
+- Estimate background from the first 3 s of the recording, which is drone-free. The Raspberry Pi version will use the same calibration step.
+- Add hysteresis: separate on (+6 dB) and off (+3 dB) thresholds, so small level changes near the threshold do not toggle the output.
+
+Result: background estimate dropped from ~46 dB to ~35.5 dB, and the detector produced one continuous detection, including through a ~6 dB dip.
+
+| Before | After |
+|---|---|
+| ![Before fix](media/Before_Fix.png) | ![After fix](media/After_Fix.png) |
+
+### Loudness is not enough (v2 to v3)
+
+v2 was tested against three non-drone recordings and failed all three:
+- **Lawnmower:** got louder partway through and was flagged as a drone for 24 s.
+- **Speech:** two loud syllables in a row triggered short false alarms.
+- **Traffic:** no alarm, but only because the clip opened with a loud vehicle, which inflated the background estimate. Later vehicles exceeded what a quiet-start background would have allowed.
+
+The drone spectrogram shows a stack of evenly spaced harmonics with a steady fundamental (~175–190 Hz). Speech and traffic lack that structure, and the lawnmower's pattern is not stable. v3 replaces the loudness test with a harmonic score plus a pitch-stability requirement, which also removes the dependence on background calibration.
+
+Result: the drone is still detected and all three decoys are rejected. The outcome held across a range of thresholds (on: 14–16, off: 10–11), so it does not depend on one specific setting.
+
+| Decoy | v2 (loudness) | v3 (harmonic) |
+|---|---|---|
+| Lawnmower | ![](media/v2_lawnmower.png) | ![](media/v3_lawnmower.png) |
+| Speech | ![](media/v2_talking.png) | ![](media/v3_talking.png) |
+| Traffic | ![](media/v2_traffic.png) | ![](media/v3_traffic.png) |
+
+### Fan test (v3)
+
+A fan was the next logical decoy because it is steady machine noise. v3 flagged it as a drone for ~30 s. Before ~15 s the harmonic pattern was too weak to trigger; once the fan was louder, the score rose above 20 and stayed there.
+
+![v3 fan false alarm](media/v3_fan.png)
+
+I documented this as a known limitation instead of adjusting thresholds to reject one clip. With one drone recording, there is no way to tell whether a new rule separates drones from fans in general or only this drone from this fan. This result is the main reason the system design includes camera confirmation.
+
+## Roadmap
+
+- [ ] **Part A: Acoustic detector.** Detection (prototyped) and direction finding; calibrate bearing error at 30° increments
+- [ ] **Part B: Tracking turret.** Pan-tilt camera mount, visual target tracking, controller tuning
+- [ ] **Part C: Integrated system.** Acoustic bearing cues the camera, which takes over tracking
+- [ ] **Testing.** Detection range, bearing accuracy, tracking error, response time
+
+## Hardware and software
+
+- **Software:** Python, NumPy, SciPy, Matplotlib; planned: pyroomacoustics (SRP-PHAT), OpenCV
+- **Planned hardware:** Raspberry Pi, 4-microphone array, Pi camera, pan-tilt servo mount
 - **CAD:** SolidWorks / Fusion 360
 
-## 📁 Repository structure
+## Repository layout
+
 ```
 drone-tracking-turret/
-├── acoustic/     # detection & direction finding (drone_doa.py)
-├── turret/       # camera tracking & servo control
-├── combined/     # acoustic-to-camera handoff
-├── hardware/     # CAD files, wiring diagrams
-├── data/         # recordings & test logs
-├── media/        # photos, videos, plots
+├── acoustic/     detection and direction finding
+├── media/        plots, photos, and videos
+├── turret/       camera tracking and servo control (planned)
+├── combined/     acoustic-to-camera handoff (planned)
+├── hardware/     CAD files and wiring diagrams (planned)
+├── data/         recordings and test logs (planned)
 └── README.md
 ```
 
-## 🧠 What I'm learning
-<!-- Update as you go: problems you hit and how you solved them. Recruiters read this. -->
-- **Background estimation (11/04):** On my first test with a 48-second drone recording, the detector flickered on and off even though the drone was audible the whole time. The cause: the script estimated background noise from the quietest 20% of the clip, but the drone was present for ~80% of it, so the "background" already included drone sound. That pushed the threshold up to the drone's own level, and every small wobble crossed it.
-  - **Fix 1:** learn the background from the first 3 seconds (drone-free), the same calibration step the Raspberry Pi version will use.
-  - **Fix 2:** hysteresis, meaning separate ON (+6 dB) and OFF (+3 dB) thresholds, so small level changes near the line don't toggle the detection.
-  - **Result:** background dropped from ~46 dB to ~35.5 dB, and the detector now gives one continuous detection for the whole time the drone is present, even through a ~6 dB dip.
+## Scope
 
-  | Before (flickering) | After (fixed) |
-  |---|---|
-  | ![Before fix](media/Before_Fix.png) | ![After fix](media/After_Fix.png) |
-
-  - **Takeaway:** a detector is only as good as its noise reference.
-- **Loudness isn't enough (11/05):** I tested v2 on three decoys: a lawnmower, people talking, and traffic. It failed all three. The lawnmower got louder partway through and was flagged as a drone for 24 s. Two loud syllables in a row triggered false alarms on speech. Traffic didn't trigger, but only because the clip opened with a loud car, which inflated the background estimate; later cars peaked above what a quiet-start background would have allowed.
-  - **What I changed:** stopped asking "how loud is it?" and started asking "what does it sound like?" The drone's spectrogram shows a stack of evenly spaced harmonic lines with a steady main tone (~175–190 Hz). Speech and traffic don't have that, and the lawnmower's pattern isn't steady. v3 requires a strong harmonic pattern plus a steady pitch for 1 s, so it no longer depends on background calibration at all.
-  - **Result:** drone still detected; all three decoys rejected. Results held across a range of thresholds (ON 14–16, OFF 10–11), which suggests they aren't tuned to one lucky value.
-
-  | Decoy | v2 (loudness) | v3 (harmonic) |
-  |---|---|---|
-  | Lawnmower | ![](media/v2_lawnmower.png) | ![](media/v3_lawnmower.png) |
-  | Talking | ![](media/v2_talking.png) | ![](media/v3_talking.png) |
-  | Traffic | ![](media/v2_traffic.png) | ![](media/v3_traffic.png) |
-
-  - **Takeaway:** a good detector looks for what makes the target *different*, not just what makes it loud.
-- **The fan test (11/05):** Steady machine noise was the obvious next decoy, so I tested a fan. v3 flagged it as a drone for ~30 s. The reason: a fan is a motor spinning blades, just like a drone, so it makes the same harmonic pattern with a steady pitch. Before ~15 s the fan's pattern was too weak to trigger; once it got louder and clearer, the score jumped above 20 and stayed there.
-
-  ![v3 fan false alarm](media/v3_fan.png)
-
-  - **Decision:** document it as a known limit instead of tweaking thresholds to beat one clip. With a single drone recording, I can't tell whether a new rule separates *drones* from *fans* or just *this* drone from *this* fan.
-  - **Takeaway:** some limits can't be fixed with better thresholds. This one is why the system pairs the microphones with a camera: sound says "something with propellers, over there," and vision confirms what it is.
-
-## ⚠️ Scope
-This is a passive detection and tracking system only. It carries no effector and does not interfere with any aircraft. Testing uses recorded drone audio and indoor sub-250 g drones; any outdoor flights follow FAA recreational rules outside restricted airspace.
+This is a passive detection and tracking system. It has no effector and does not interfere with any aircraft. Testing uses recorded audio; any flight testing will follow FAA recreational rules outside restricted airspace.
 
 ---
-*Built by Mat Yohannes · Mechanical Engineering, Howard University*
+Mathew Yohannes, Mechanical Engineering, Howard University
